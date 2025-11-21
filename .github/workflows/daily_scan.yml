@@ -3,7 +3,7 @@ name: Daily Stock Screener
 # Trigger: Run every day at 22:00 UTC (6:00 PM EST) or manually
 on:
   schedule:
-    - cron: '0 22 * * *'
+    - cron: '0 14 * * *'
   workflow_dispatch:
 
 permissions:
