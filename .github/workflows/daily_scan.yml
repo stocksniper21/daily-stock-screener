@@ -30,7 +30,7 @@ jobs:
         run: |
           # The new script only asks ONE question: Select Index.
           # We send "2" to select "NASDAQ Composite (Auto)"
-          printf "1\n" | python stock_screener.py
+          printf "2\n" | python stock_screener.py
 
       - name: Deploy to GitHub Pages
         uses: JamesIves/github-pages-deploy-action@v4
