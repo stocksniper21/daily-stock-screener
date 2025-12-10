@@ -222,21 +222,42 @@ def get_nasdaq_composite_tickers():
     url = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt"
     try:
         response = requests.get(url, timeout=30)
+        response.raise_for_status() # Check for errors
         df = pd.read_csv(io.StringIO(response.text), sep='|')
         if 'Test Issue' in df.columns: df = df[df['Test Issue'] == 'N']
         df = df.dropna(subset=['Symbol'])
         df = df[~df['Symbol'].astype(str).str.contains('File Creation')]
         return [str(t).replace('.', '-') for t in df['Symbol'].tolist()]
-    except Exception: return []
+    except Exception as e:
+        print(f"   [Error] Failed to fetch NASDAQ Composite: {e}")
+        return []
 
 def get_sp500_tickers():
     print("Fetching S&P 500 list...")
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
     try:
-        tables = pd.read_html(url)
-        df = tables[0]
-        return [str(t).replace('.', '-') for t in df['Symbol'].tolist()]
-    except Exception: return []
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        tables = pd.read_html(io.StringIO(response.text))
+        target_df = next((t for t in tables if 'Symbol' in t.columns or 'Ticker symbol' in t.columns), None)
+        
+        if target_df is None:
+            print("   [Error] S&P 500 table not found on Wikipedia.")
+            return []
+            
+        # Normalize column name if needed
+        if 'Ticker symbol' in target_df.columns:
+            target_df = target_df.rename(columns={'Ticker symbol': 'Symbol'})
+            
+        tickers = [str(t).replace('.', '-') for t in target_df['Symbol'].tolist()]
+        print(f"   Found {len(tickers)} S&P 500 tickers.")
+        return tickers
+        
+    except Exception as e:
+        print(f"   [Error] Failed to fetch S&P 500: {e}")
+        return []
 
 # --- FUNDAMENTAL CHECK ---
 def check_fundamentals(ticker, mode):
