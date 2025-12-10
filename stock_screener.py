@@ -6,14 +6,15 @@ import io
 import datetime
 import concurrent.futures
 import json
+import os
 import warnings
 
 # --- CONFIGURATION ---
-BATCH_SIZE = 50         # Batch size to prevent rate limits
-LOOKBACK_DAYS = 5       # Days to look back for a cross event
-SLEEP_TIME = 2          # Sleep between batches
-MAX_WORKERS = 5         # Threads for fundamental analysis
-MAX_RETRIES = 3         # Retry attempts for downloads
+BATCH_SIZE = 50         
+LOOKBACK_DAYS = 5       
+SLEEP_TIME = 2          
+MAX_WORKERS = 5         
+MAX_RETRIES = 3         
 OUTPUT_FILENAME = "index.html" 
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -40,7 +41,7 @@ HTML_TEMPLATE = """
                 <h1 class="text-3xl font-bold text-blue-400 flex items-center gap-2">
                     <i data-lucide="crosshair" class="w-8 h-8"></i> Market Sniper & Scanner
                 </h1>
-                <p class="text-slate-400 text-sm mt-1">Trend Following (Crosses) + Mean Reversion (Sniper)</p>
+                <p class="text-slate-400 text-sm mt-1">Trend Following (Crosses) + Sniper (RSI > 70 & High Vol)</p>
             </div>
             <div class="text-right">
                 <div class="text-sm text-slate-500 italic">Updated: <span id="gen-date" class="text-slate-300"></span></div>
@@ -48,13 +49,14 @@ HTML_TEMPLATE = """
             </div>
         </header>
 
+        <!-- Stats Cards -->
         <div id="stats-container" class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
             <div class="bg-slate-800 p-4 rounded-lg border-l-4 border-blue-500 shadow-lg">
                 <div class="text-slate-400 text-xs uppercase font-bold">Total Setups</div>
                 <div class="text-2xl font-bold text-white" id="stat-total">0</div>
             </div>
             <div class="bg-slate-800 p-4 rounded-lg border-l-4 border-purple-500 shadow-lg">
-                <div class="text-slate-400 text-xs uppercase font-bold">Sniper Setups (Bear)</div>
+                <div class="text-slate-400 text-xs uppercase font-bold">Sniper Setups (High Conviction)</div>
                 <div class="text-2xl font-bold text-purple-400" id="stat-sniper">0</div>
             </div>
             <div class="bg-slate-800 p-4 rounded-lg border-l-4 border-emerald-500 shadow-lg">
@@ -67,16 +69,18 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
+        <!-- Filters -->
         <div id="filters-container" class="flex flex-wrap gap-4 mb-6">
             <input type="text" id="search-input" placeholder="Search Ticker..." class="bg-slate-800 border border-slate-700 rounded px-4 py-2 focus:outline-none focus:border-blue-500 text-sm transition-colors">
             <select id="category-filter" class="bg-slate-800 border border-slate-700 rounded px-4 py-2 text-sm focus:outline-none hover:bg-slate-700 transition-colors">
                 <option value="all">All Strategies</option>
-                <option value="Sniper">🎯 Sniper (Overextended)</option>
+                <option value="Sniper">🎯 Sniper (High Conviction)</option>
                 <option value="Bullish">🚀 Bullish Cross</option>
                 <option value="Bearish">📉 Bearish Cross</option>
             </select>
         </div>
 
+        <!-- Data Table -->
         <div class="overflow-x-auto bg-slate-800 rounded-lg shadow-xl" id="table-container">
             <table class="w-full text-left border-collapse">
                 <thead>
@@ -85,13 +89,14 @@ HTML_TEMPLATE = """
                         <th class="p-4 font-medium">Strategy</th>
                         <th class="p-4 font-medium">Signal / Pattern</th>
                         <th class="p-4 font-medium">Price</th>
-                        <th class="p-4 font-medium">AVWAP / Trend</th>
+                        <th class="p-4 font-medium">Trend Info</th>
                         <th class="p-4 font-medium">Details</th>
                         <th class="p-4 font-medium">Date</th>
                     </tr>
                 </thead>
                 <tbody id="table-body" class="text-sm divide-y divide-slate-700">
-                    </tbody>
+                    <!-- Rows injected via JS -->
+                </tbody>
             </table>
         </div>
         
@@ -186,17 +191,20 @@ HTML_TEMPLATE = """
 def get_sma(series, window):
     return series.rolling(window=window).mean()
 
+def get_rsi(series, period=14):
+    """Calculates RSI."""
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
 def calculate_anchored_vwap(df):
     """Calculates VWAP anchored to the highest volume day in the last 60 days."""
     try:
-        # Look at last 60 days for the anchor event
         recent_data = df.tail(60)
         max_vol_idx = recent_data['Volume'].idxmax()
-        
-        # Slice data starting from that index
         subset = df.loc[max_vol_idx:].copy()
-        
-        # VWAP Formula
         subset['PV'] = subset['Close'] * subset['Volume']
         subset['Cum_PV'] = subset['PV'].cumsum()
         subset['Cum_Vol'] = subset['Volume'].cumsum()
@@ -232,8 +240,6 @@ def get_sp500_tickers():
 
 # --- FUNDAMENTAL CHECK ---
 def check_fundamentals(ticker, mode):
-    # For Sniper setups, we might skip deep fundamental checks or keep them optional
-    # This existing function works for Trend scans
     try:
         time.sleep(0.5) 
         stock = yf.Ticker(ticker)
@@ -262,7 +268,6 @@ def check_fundamentals(ticker, mode):
 def download_data_with_retry(tickers):
     for attempt in range(MAX_RETRIES):
         try:
-            # We need 6mo for AVWAP context, 1y is safer for 200SMA
             data = yf.download(tickers, period="1y", group_by='ticker', progress=False, threads=True, auto_adjust=True)
             return data
         except Exception:
@@ -271,8 +276,6 @@ def download_data_with_retry(tickers):
 
 def analyze_batch(tickers):
     results_list = []
-    
-    # We will hold matches temporarily here
     trend_matches = [] 
 
     try:
@@ -295,15 +298,15 @@ def analyze_batch(tickers):
                 curr = df.iloc[-1]
                 prev = df.iloc[-2]
                 
-                # Filter penny stocks
                 if curr['Close'] <= 5: continue
 
-                # Calculate Indicators
+                # Indicators
                 df['SMA50'] = get_sma(df['Close'], 50)
                 df['SMA200'] = get_sma(df['Close'], 200)
                 df['VolSMA50'] = get_sma(df['Volume'], 50)
+                df['RSI'] = get_rsi(df['Close'])  # NEW: RSI
                 
-                # Bollinger Bands (For Sniper)
+                # Bollinger Bands
                 df['BB_Mid'] = df['Close'].rolling(window=20).mean()
                 df['BB_Std'] = df['Close'].rolling(window=20).std()
                 df['BB_Upper'] = df['BB_Mid'] + (2 * df['BB_Std'])
@@ -311,7 +314,6 @@ def analyze_batch(tickers):
                 sma50_val = df['SMA50'].iloc[-1]
                 vol_sma_val = df['VolSMA50'].iloc[-1]
                 
-                # Liquidity Check (20M daily dollar volume)
                 if pd.isna(sma50_val) or pd.isna(vol_sma_val): continue
                 if (sma50_val * vol_sma_val) < 20000000: continue
 
@@ -321,36 +323,42 @@ def analyze_batch(tickers):
                 is_sniper = False
                 sniper_reasons = []
                 
-                # 1. Extension Check: Price > 20% above SMA50
+                # Filter 1: Extension (Price > 20% above SMA50)
                 deviation_pct = (curr['Close'] - sma50_val) / sma50_val * 100
                 
-                if deviation_pct > 20: 
-                    # 2. Candle Patterns
-                    if curr['High'] >= df['BB_Upper'].iloc[-1]: sniper_reasons.append("Hit Upper BB")
-                    if (curr['Open'] > prev['Close']) and (curr['Close'] < prev['Open']): sniper_reasons.append("Bearish Engulfing")
-                    if (curr['Open'] < prev['Close']) and (curr['Close'] < curr['Open']): sniper_reasons.append("Gap Down")
+                # Filter 2: NEW RSI Check (> 70 Overbought)
+                rsi_val = df['RSI'].iloc[-1]
+                
+                if deviation_pct > 20 and rsi_val > 65: # Slightly relaxed 65 to catch top
                     
-                    if sniper_reasons:
-                        # 3. AVWAP Check
-                        avwap, anchor_date = calculate_anchored_vwap(df)
-                        if avwap:
+                    # Filter 3: High Relative Volume (Selling Pressure)
+                    avg_vol = df['VolSMA50'].iloc[-1]
+                    rel_vol = curr['Volume'] / avg_vol
+                    
+                    if rel_vol > 1.2: # Must be higher than average volume
+                        
+                        # Filter 4: Candle Patterns
+                        if curr['High'] >= df['BB_Upper'].iloc[-1]: sniper_reasons.append("Hit Upper BB")
+                        if (curr['Open'] > prev['Close']) and (curr['Close'] < prev['Open']): sniper_reasons.append("Bearish Engulfing")
+                        if (curr['Open'] < prev['Close']) and (curr['Close'] < curr['Open']): sniper_reasons.append("Gap Down")
+                        
+                        if sniper_reasons:
+                            avwap, anchor_date = calculate_anchored_vwap(df)
                             is_sniper = True
-                            dist_to_avwap = (curr['Close'] - avwap) / avwap * 100
                             
                             results_list.append({
                                 'Ticker': ticker,
                                 'Category': "Sniper (Bear)",
                                 'Signal': ", ".join(sniper_reasons),
                                 'Price': round(curr['Close'], 2),
-                                'AVWAP_Info': f"AVWAP: ${avwap:.2f}",
-                                'Details': f"Ext: {deviation_pct:.1f}% | Anchor: {anchor_date}",
+                                'AVWAP_Info': f"RSI: {round(rsi_val)} | Vol: {round(rel_vol,1)}x",
+                                'Details': f"Ext: {deviation_pct:.1f}% | AVWAP: {round(avwap,2) if avwap else 'N/A'}",
                                 'Date': str(curr.name.date())
                             })
 
                 # ---------------------------------------------------------
-                # STRATEGY 2: TREND CROSS (Golden / Death Cross)
+                # STRATEGY 2: TREND CROSS
                 # ---------------------------------------------------------
-                # Only check if not already a sniper (or check both, up to you)
                 if not is_sniper:
                     subset = df.iloc[-(LOOKBACK_DAYS+1):]
                     if len(subset) > 2:
@@ -359,19 +367,16 @@ def analyze_batch(tickers):
                         dates = subset.index
 
                         for i in range(1, len(sma50_s)):
-                            # Golden Cross
                             if sma50_s[i-1] <= sma200_s[i-1] and sma50_s[i] > sma200_s[i]:
                                 trend_matches.append({'Ticker': ticker, 'Mode': 'bullish', 'Price': curr['Close'], 'Date': str(dates[i].date())})
                                 break
-                            # Death Cross
                             elif sma50_s[i-1] >= sma200_s[i-1] and sma50_s[i] < sma200_s[i]:
                                 trend_matches.append({'Ticker': ticker, 'Mode': 'bearish', 'Price': curr['Close'], 'Date': str(dates[i].date())})
                                 break
 
             except Exception: continue
 
-        # --- PROCESS TREND MATCHES (FUNDAMENTALS) ---
-        # We process these in parallel as they need fundamental checks
+        # --- PROCESS TREND MATCHES ---
         if trend_matches:
             with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 future_to_item = {executor.submit(check_fundamentals, item['Ticker'], item['Mode']): item for item in trend_matches}
